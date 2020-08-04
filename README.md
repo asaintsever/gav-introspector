@@ -14,7 +14,10 @@ Supported flags:
 
 - `--fail-fast`, process immediately exits if an artifact cannot be resolved. Default is to continue processing remaining artifacts. In both cases the process will return with a non zero exit code.
 - `--unresolved-ext <extension>`, append provided extension to all unresolved artifacts. If `--fail-fast` flag is also enabled, the custom extension will only be appended to the artifact that caused the exit. By default unresolved artifacts are left unchanged.
-
-The script supports nested directory structure and ignore non Java artifacts.
+- `--purge-cache`, flush existing local cache (artifacts' hash). Local cache will be rebuilt from the ground up.
 
 Resolved artifacts are renamed following standard GAV pattern: `<groupId>.<artifactId>-<version>.jar`
+
+## Links
+
+- Maven Search API: <https://search.maven.org/classic/#api>
