@@ -29,8 +29,7 @@ extract_gav() {
   cd "$JAVA_ARTIFACTS_ROOT_DIR"
 
   for file in $(find -name "*.jar" | sed "s/^\.\///g"); do
-    ISFAIL=false; GROUPID=""; ARTIFACTID=""; VERSION=""
-    GAVFILE="$file$UNRESOLVED_EXT"
+    ISFAIL=false; GROUPID=""; ARTIFACTID=""; VERSION=""; GAVFILE=""; MVNSEARCHRESP=""
     HASH=$(shasum -a 1 $file | cut -d ' ' -f 1)
 
     # Hash lookup in local cache
@@ -42,34 +41,57 @@ extract_gav() {
 
       GROUPID=$(cat "$GAVSPECTOR_TMP_DIR/gav.tmp" | grep "^groupId" | cut -d '=' -f 2 | sed -e 's/[[:space:]]*$//')
 
-      # If groupId not found: no need to lose time extracting artifactId and version
-      if [ "$GROUPID" != "" ];then
+      # If groupId not found or more than one (may be the case if several folders under META-INF/maven/): no need to lose time extracting artifactId and version
+      if [ "$GROUPID" != "" ] && [ "$(echo $GROUPID | wc -w)" -eq 1 ];then
         ARTIFACTID=$(cat "$GAVSPECTOR_TMP_DIR/gav.tmp" | grep "^artifactId" | cut -d '=' -f 2 | sed -e 's/[[:space:]]*$//')
         VERSION=$(cat "$GAVSPECTOR_TMP_DIR/gav.tmp" | grep "^version" | cut -d '=' -f 2 | sed -e 's/[[:space:]]*$//')
+
+        # Make sure file begins with "<ARTIFACT ID>-<VERSION>" (it happens Maven metadata do not always reflect the artifact's real identity)
+        # Do not perform strict match here as some artifacts may have '-<CLASSIFIER>' after the version
+        if [[ $file = "$ARTIFACTID-$VERSION"* ]];then
+            GAVFILE=$GROUPID.$file
+            # Save GAV in file using hash as filename: build local cache
+            echo "$GAVFILE" > "$GAVSPECTOR_HASH_DIR/$HASH"
+        fi
       fi
 
-      if [ "$GROUPID" != "" ] && [ "$ARTIFACTID" != "" ] && [ "$VERSION" != "" ];then
-        GAVFILE="$GROUPID.$ARTIFACTID-$VERSION.jar"
-        # Save GAV in file using hash as filename: build local cache
-        echo "$GAVFILE" > "$GAVSPECTOR_HASH_DIR/$HASH"
-      else
-        # Not found: Hash lookup using Maven Search API
+      if [ "$GAVFILE" = "" ];then
+        # Not found: Hash lookup using Maven Search API (set 'rows' param >1 to detect resolution issues)
         if MVNSEARCHRESP=$(curl \
                             --connect-timeout 10 \
                             --retry 2 \
                             --retry-delay 1 \
                             -k -s \
-                            "https://search.maven.org/solrsearch/select?q=1:%22$HASH%22&rows=1&wt=json" \
+                            "https://search.maven.org/solrsearch/select?q=1:%22$HASH%22&rows=5&wt=json" \
                             2>&1);then
-          if [ $(echo "$MVNSEARCHRESP" | jq '.response.docs | length') = "0" ];then
-            echo "--- Fail to retrieve GAV for $file from Maven Search service"; echo "$MVNSEARCHRESP"; ISFAIL=true
+          MVNSEARCHRESP_NUM=$(echo "$MVNSEARCHRESP" | jq '.response.docs | length')
+
+          if [ "$MVNSEARCHRESP_NUM" = "0" ];then
+              echo "--- Fail to retrieve GAV for $file from Maven Search service"; echo "$MVNSEARCHRESP"; GAVFILE="$file$UNRESOLVED_EXT"; ISFAIL=true
           else
-            GAVFILE=$(echo $MVNSEARCHRESP | jq -r '.response.docs[0].g + "." + .response.docs[0].a + "-" + .response.docs[0].v + ".jar"')
-            # Save GAV in file using hash as filename: build local cache
-            echo "$GAVFILE" > "$GAVSPECTOR_HASH_DIR/$HASH"
+            # Loop and look for entry with artifactId matching $file
+            for (( index=0; index<$(($MVNSEARCHRESP_NUM)); index++ )); do
+                ARTIFACTID=$(echo $MVNSEARCHRESP | jq -r --argjson resp_indx $index '.response.docs[$resp_indx].a')
+                VERSION=$(echo $MVNSEARCHRESP | jq -r --argjson resp_indx $index '.response.docs[$resp_indx].v')
+
+                # Make sure file begins with "<ARTIFACT ID>-<VERSION>"
+                # Do not perform strict match here as some artifacts may have '-<CLASSIFIER>' after the version
+                if [[ $file = "$ARTIFACTID-$VERSION"* ]];then
+                    GROUPID=$(echo $MVNSEARCHRESP | jq -r --argjson resp_indx $index '.response.docs[$resp_indx].g')
+                    GAVFILE=$GROUPID.$file
+                    break
+                fi
+            done
+
+            if [ "$GAVFILE" = "" ];then
+                echo "Fail to resolve GAV for $file using Maven Search service"; echo "$MVNSEARCHRESP"; GAVFILE="$file$UNRESOLVED_EXT"; ISFAIL=true
+            else
+              # Save GAV in file using hash as filename: build local cache
+              echo "$GAVFILE" > "$GAVSPECTOR_HASH_DIR/$HASH"
+            fi
           fi
         else
-          echo "--- Fail to retrieve GAV for $file from Maven Search service"; echo "$MVNSEARCHRESP"; ISFAIL=true
+          echo "--- Fail to retrieve GAV for $file from Maven Search service"; echo "$MVNSEARCHRESP"; GAVFILE="$file$UNRESOLVED_EXT"; ISFAIL=true
         fi
       fi
     fi
